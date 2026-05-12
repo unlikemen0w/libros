@@ -1218,6 +1218,12 @@ if (!hasLocalData) {
   // Has local data — use it, auto-push will keep GitHub updated
   init_app();
 }
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
 </script>
 </body>
 </html>
