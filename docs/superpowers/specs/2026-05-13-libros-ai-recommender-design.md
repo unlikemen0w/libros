@@ -112,18 +112,27 @@ Reuses the existing `wish-modal` overlay pattern: fade-in overlay, centered glas
    - **Pick action button states**:
      - Default: `+ Add to wishlist` — purple-tinted glass pill
      - After click: `✓ Added` — green-tinted glass pill, non-interactive
-   - **Refine-question block** (appears after picks): dashed-line separator above; small uppercase purple label ("Want to refine?") with a glowing dot; left-bordered card with subtle purple gradient background; tappable refinement chips below (e.g., "Polish only", "More fiction", "Heavier"). Visually distinct from a regular AI bubble so it reads as an actionable question, not commentary.
+   - **Refine-question drawer** (appears after picks, attached to the input): when the AI emits a follow-up question, it renders as a glass "drawer" that physically attaches to the top of the text input area — rounded top corners, square bottom corners that meet the input's square top. Drawer contains:
+     - A small "tab handle" stub on the top edge (visual indicator that this is a layered element)
+     - An uppercase purple label ("I have a follow-up") preceded by a small pulsing dot
+     - The question text in a slightly larger font than chat bubbles
+     - Tappable refinement chips ("Polish only", "More fiction", "Heavier")
+     - Background: subtle purple gradient (`rgba(196,181,253,0.18) → rgba(123,107,189,0.12)`) with `rgba(196,181,253,0.45)` border
+     - Shadow blooms upward (`box-shadow: 0 -6px 24px rgba(123,107,189,0.15)`) to lift it off the chat behind
+   - **Why a drawer, not a bubble**: questions must be hardest to miss — the drawer attaches to where the answer goes (the input), uses a pulsing dot, and breaks the "everything is a bubble" pattern. Only one drawer exists at a time (it replaces on the next AI turn) — the previous question disappears once you've moved past it, which mirrors how you'd actually engage with it.
 3. **Input area** — pinned bottom: rounded glass capsule with text field + circular gradient send button.
 4. **Empty state** (just opened, no messages yet) — centered icon (📚) + tagline ("I've read your 357 books. Tell me what you're in the mood for…") + a single primary "✨ Recommend me something" chip that fires the quick-start prompt. The text input is still available below for typed prompts.
 
-### Book covers — fetched from Google Books API
+### Book covers — fetched from Open Library
 
-- After the AI's tool call returns 3 picks, for each pick we async-call `https://www.googleapis.com/books/v1/volumes?q=intitle:<title>+inauthor:<author>&maxResults=1` (free, no key)
-- Use `items[0].volumeInfo.imageLinks.thumbnail` (HTTPS-fix the URL — Google returns `http://` by default; rewrite to `https://`)
+- After the AI's tool call returns 3 picks, for each pick we async-fetch covers from Open Library (free, no API key, no quota issues — Google Books anonymous quota proved too tight during testing)
+- **Two-step lookup:**
+  1. Search: `GET https://openlibrary.org/search.json?q=<title>+<author>&limit=1` → returns `docs[0].cover_i` (integer cover ID)
+  2. Construct URL: `https://covers.openlibrary.org/b/id/<cover_i>-M.jpg` (M = medium, ~180px wide; suitable for our 42×60 slot)
 - Render the image inside the existing 42×60 cover slot
-- **Fallback if API fails or no match:** keep the gradient-with-title-text already shown — looks intentional, never broken
-- Cards render immediately with the gradient; cover image swaps in when the fetch resolves (~100-300ms typical)
-- One small cache (`libros_cover_cache` in localStorage, keyed by `${author}|${title}`) so repeat asks for the same book are instant on subsequent turns
+- **Fallback if no result or fetch fails:** keep the gradient-with-title-text shown by default — looks intentional, never appears broken
+- Cards render immediately with the gradient; cover image swaps in when the fetch resolves (~100–400ms typical)
+- One small cache (`libros_cover_cache` in localStorage, keyed by `${author}|${title}`, storing either the cover URL or a `null` sentinel for "we tried and there was no result") so repeat asks for the same book are instant on subsequent turns and we don't re-query the API for known misses
 
 ### Liquid-glass treatment (matches existing app)
 
@@ -168,4 +177,4 @@ _To be filled after approval._
 ## Brainstorming session log
 
 - 2026-05-13 — Initial scope, all 8 decisions locked. Architecture diagram approved.
-- 2026-05-14 — Section 2 (UI) approved with v2 mockup: liquid bubbles with hover lift, real Google Books cover art with gradient fallback, dedicated "Want to refine?" question block separated from pick cards. Continuing with data flow.
+- 2026-05-14 — Section 2 (UI) v2 reviewed: liquid bubbles + cover art approved. Question-vs-pick differentiation revisited with three alternative styles (section labels / banner with avatar / drawer above input). User selected **drawer above input** (Option C). Cover source switched from Google Books to Open Library after Google's anonymous quota proved unreliable during testing. Section 2 now locked.
