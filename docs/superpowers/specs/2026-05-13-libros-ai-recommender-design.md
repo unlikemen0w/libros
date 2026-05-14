@@ -1,6 +1,6 @@
 # Libros v2.0 — AI Book Recommender
 
-**Status:** Brainstorming in progress (sections being reviewed one at a time)
+**Status:** Design complete — pending user review, then implementation
 **Started:** 2026-05-13
 **Spec author:** Tomek + Claude
 **Target file:** Inline in `index.html` (consistent with existing single-file architecture)
@@ -30,14 +30,17 @@ Give Libros a way to recommend what to read next, using your full reading histor
 
 ## Cost model
 
-| Scenario | Per query |
-|---|---|
-| First call in session (cache miss) | ~$0.02 |
-| Cached calls (same library, same session) | ~$0.006 |
-| Library mutated between calls (cache invalidate) | ~$0.02 (rebuilds cache) |
-| 50 chats / month (typical) | ≈ $1 |
+Using Claude Sonnet 4.6 pricing (input $3/M, output $15/M, cache write $3.75/M, cache read $0.30/M).
 
-**Library context:** ~3,900 tokens for the 357-book list + year labels + JSON overhead. Plus ~500 tokens system prompt. Total input per turn ~4,500–5,000 tokens.
+| Scenario | Input cost | Output cost | Total per turn |
+|---|---|---|---|
+| First call in session (cache miss) | ~$0.015 (5K tok × $3/M) | ~$0.0075 (500 tok × $15/M) | **~$0.022** |
+| Cached calls (same library, same session) | ~$0.0015 (5K tok × $0.30/M) | ~$0.0075 | **~$0.009** |
+| Library mutated → cache rebuild | ~$0.019 (cache write at $3.75/M) | ~$0.0075 | **~$0.026** |
+
+**Typical month, ~50 chat turns:** ≈ **$0.50–$0.80** total (mostly cached reads after the first turn of each session).
+
+**Library context size:** ~3,900 tokens for the 357-book list + year labels + JSON overhead. Plus ~500 tokens persona + rules. Total input per turn ~4,500–5,000 tokens.
 
 ---
 
@@ -229,7 +232,7 @@ The contract with Claude has three pieces: the system prompt, the tool schema, a
 
 ### System prompt (cached, ~4,500 tokens)
 
-Single string built once per call from current state. Marked `cache_control: { type: "ephemeral" }` so subsequent turns in the same session pay ~$0.0006 instead of ~$0.015 for input.
+Single string built once per call from current state. Marked `cache_control: { type: "ephemeral" }` so subsequent turns in the same session pay ~$0.0015 (cache read at $0.30/M) instead of ~$0.015 (input at $3/M) for the library portion.
 
 ```
 You are a thoughtful librarian for Tomek. You know his full reading history
@@ -357,15 +360,81 @@ Body:
 
 ---
 
-## Error handling (pending — Section 5)
+## Error handling
 
-_To be filled after approval._
+Every failure mode the app can hit, and what the user sees. **All errors are non-modal** — they render as a normal-looking AI bubble with a red-tinted `error` modifier class. No alerts, no blocking dialogs.
+
+| Failure | When it happens | Behavior |
+|---|---|---|
+| **No API key on first use** | User taps FAB, `libros_ai_key` missing | `prompt()` asks for key (link to console.anthropic.com → Settings → API Keys); if user cancels, modal closes silently — no error. |
+| **Invalid API key (401)** | Anthropic returns 401 (key revoked, wrong format) | Error bubble: *"That key isn't working. Want to enter a new one?"* with a tappable inline link that reopens the setup prompt. `libros_ai_key` is cleared so next attempt re-runs setup. |
+| **Rate limit (429)** | Hit Anthropic per-minute/per-day cap | Error bubble: *"Hit a rate limit — try again in a minute."* Single `Retry` button on the bubble re-sends the same turn. No automatic retry loop. |
+| **Insufficient credits / billing (402, 403)** | Account balance empty or disabled | Error bubble: *"Your Anthropic account can't run this right now — check console.anthropic.com → Billing."* No retry, no key reset. |
+| **Network failure / offline** | `fetch()` rejects, no response | Error bubble: *"Couldn't reach the AI service — check your connection."* Single `Retry` button. PWA service worker doesn't intercept these (`api.anthropic.com` is cross-origin), so this is purely a real network event. |
+| **Stream interrupted mid-turn** | SSE connection drops mid-response | If we got partial text or partial tool input → discard partial bubble/card, show *"Connection dropped — retry?"* with the `Retry` button. **No half-rendered picks**. |
+| **User closes modal mid-stream** | × or click-outside while request in flight | Abort the `fetch` via `AbortController`, drop the in-memory chat state, no error shown. Idempotent. |
+| **Tool input malformed JSON** | Theoretically can't happen (Anthropic validates schema) but defensive | Error bubble: *"Couldn't read the recommendation — retry?"* Pick cards are not rendered. Retry button re-sends. |
+| **Fewer than 3 picks returned** | Shouldn't happen (`minItems: 3` enforced) — defensive | Render what we got, log warning to console. No user-facing error since picks are valid. |
+| **Open Library 404 / no `cover_i`** | Book genuinely has no cover record | Cache `null` for that key. Card keeps its gradient placeholder. No visible error. |
+| **Open Library fetch error** | DNS, CORS, 500, network blip | Same as 404 — gradient stays. **Don't cache** (retry on next session). |
+| **Empty library** | Fresh device pre-sync, `books` global is `{}` | Error bubble: *"I don't see any reading history yet — open the app on your phone first or import a backup."* No API call made. |
+| **Library exceeds context limit** | Way beyond current 357 books — say >50,000 books | Defensive only: if serialized library > 150K tokens, trim to most recent 5 years + warn in console. Won't trigger in foreseeable use. |
+
+### Implementation notes
+
+- **Retry button** is a small inline button inside the error bubble; tapping it replays the previous `chatMessages` state without appending a duplicate user message.
+- **`AbortController`** wraps every fetch so closing the modal genuinely cancels in-flight work — both the Anthropic stream and any in-flight Open Library calls.
+- **Console logging** uses `console.warn` for non-user-facing oddities (e.g., schema deviations, unexpected SSE events). Production app has no logging service — these are for future debugging.
+- **No telemetry, no analytics** — consistent with the existing app's privacy posture.
 
 ---
 
-## Testing (pending — Section 6)
+## Testing
 
-_To be filled after approval._
+The libros codebase has no automated test suite (it's a single-file SPA — `index.html`). Verification for v2 is a **manual smoke-test checklist** that covers the golden path and every error branch in the table above.
+
+### Smoke-test checklist
+
+**Setup**
+- [ ] Open app at `https://unlikemen0w.github.io/libros` (or local file)
+- [ ] Confirm a fresh device with no `libros_ai_key` in localStorage; FAB visible bottom-right
+
+**Golden path**
+- [ ] Tap FAB → key prompt appears; paste valid Anthropic key → modal opens in empty state
+- [ ] Tap "Recommend me something" chip → user bubble appears, then AI text bubble streams in within ~500ms
+- [ ] Three pick cards render with gradient placeholders, then covers swap in within ~1s
+- [ ] AI may emit a follow-up question → drawer appears above the input with pulsing dot
+- [ ] Tap a refinement chip → new turn starts; old drawer disappears
+- [ ] Tap "+ Add to wishlist" on a pick → button flips to "✓ Added"; toast shows; close modal; open wishlist → book is there
+- [ ] Wait ~2s; check GitHub repo → new "Sync books data" commit landed
+
+**Fluid context**
+- [ ] Add a new book to the library; open chat in same session; recommend → AI mentions or avoids the new book correctly (proves the rebuilt prompt picked it up)
+- [ ] Add a book to wishlist via the new flow; close modal; reopen; recommend → AI does not re-suggest the wishlisted book
+
+**Error branches**
+- [ ] Enter a deliberately invalid Anthropic key → 401 error bubble with "enter a new one?" link; tap it → setup prompt reopens
+- [ ] Disable network (DevTools → Offline) → trigger a recommendation → "Couldn't reach AI service" bubble with Retry
+- [ ] Re-enable network, tap Retry → recommendation completes successfully
+- [ ] Close modal while a stream is in flight → no errors logged; reopening modal is clean
+- [ ] Pick a fake author/title that Open Library won't find → pick card stays on gradient cover; no console error visible to user
+- [ ] Clear localStorage `books` to simulate empty library → trigger recommendation → "no reading history yet" error bubble; no API call made (verify in DevTools Network tab)
+
+**Mobile (iOS PWA installed from home screen)**
+- [ ] FAB visible above any safe-area insets
+- [ ] Modal renders full-screen-ish (modal CSS already handles small viewports)
+- [ ] Tapping refinement chips works (touch targets ≥44px)
+- [ ] Covers load over cellular
+
+**Cost sanity check**
+- [ ] After ~10 chat turns in one session, check Anthropic console → confirm input tokens billed mostly as `cache_read` (not `cache_creation`) — proves caching works
+- [ ] Estimate cost: should be ~$0.10–$0.15 for a 10-turn session (1 cache write + 9 cache reads + outputs)
+
+### Out of scope for v2
+
+- Unit tests / Jest / Playwright — not introducing test infra for a single-file app
+- E2E tests — manual smoke is sufficient given the app's scale and personal use
+- Automated visual regression — covered by manual mobile check
 
 ---
 
@@ -380,4 +449,5 @@ _To be filled after approval._
 - 2026-05-13 — Initial scope, all 8 decisions locked. Architecture diagram approved.
 - 2026-05-14 — Section 2 (UI) v2 reviewed: liquid bubbles + cover art approved. Question-vs-pick differentiation revisited with three alternative styles (section labels / banner with avatar / drawer above input). User selected **drawer above input** (Option C). Cover source switched from Google Books to Open Library after Google's anonymous quota proved unreliable during testing. Section 2 now locked.
 - 2026-05-14 — Section 3 (data flow) approved as-presented: 5-stage flow with SSE streaming, tool-call parsing, async cover hydration via Open Library, and wishlist push reusing existing `saveWishlist()`.
-- 2026-05-14 — Section 4 (API + prompt structure) approved as-presented: system prompt with cached library/wishlist context, `recommend_books` tool with 3-pick array schema, claude-sonnet-4-6, stream=true, max_tokens=1024. Moving to Section 5 (error handling).
+- 2026-05-14 — Section 4 (API + prompt structure) approved as-presented: system prompt with cached library/wishlist context, `recommend_books` tool with 3-pick array schema, claude-sonnet-4-6, stream=true, max_tokens=1024.
+- 2026-05-14 — Sections 5 (error handling) and 6 (testing) approved as-presented and written into the spec. Design phase complete. Next step: user reviews the doc end-to-end, then `superpowers:writing-plans` to produce the implementation plan.
