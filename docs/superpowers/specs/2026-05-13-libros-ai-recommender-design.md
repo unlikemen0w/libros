@@ -144,9 +144,82 @@ Every interactive surface (bubbles, pick cards, refine chips, FAB) gets:
 
 ---
 
-## Data flow (pending — Section 3)
+## Data flow
 
-_To be filled after approval._
+Five stages from "user clicks the FAB" to "book is in the wishlist". One Anthropic round-trip per turn.
+
+### Stage 1 — OPEN
+
+- User taps FAB → `openAIChat()`
+- Read `libros_ai_key` from localStorage
+- If **missing**: `prompt('Paste your Anthropic API key (console.anthropic.com → Settings → API Keys, "sk-ant-…")')` → store under `libros_ai_key`. If user cancels, close modal.
+- If **present**: open chat modal in empty state. The quick-start chip and text input are both available.
+
+### Stage 2 — SEND TURN
+
+Triggered by quick-start chip tap, send-button click on typed input, or refinement-chip tap.
+
+- Build user message text from the trigger:
+  - Quick-start: `"Based on my library, what should I read next?"`
+  - Typed input: the verbatim text
+  - Refinement chip: the chip's text (e.g., `"Polish only"`)
+- Append to in-memory `chatMessages` array (cleared at modal close)
+- Call `buildSystemPrompt()`:
+  - Persona block: "You are a thoughtful librarian who knows the user's full reading history. Recommend books they'd actually love, and ask one short follow-up question if helpful."
+  - Library block: JSON of the current `books` global, grouped by year
+  - Wishlist block: JSON of the current `wishlist` (so the AI doesn't re-recommend)
+  - Rules block: when recommending, always invoke the `recommend_books` tool; never invent ISBNs; prefer authors the user has read; respect language preferences inferred from history
+  - **Marked with `cache_control: { type: "ephemeral" }`** on the library + wishlist + persona block (so subsequent turns in the same session hit the cache)
+- POST to `https://api.anthropic.com/v1/messages`:
+  - Headers: `x-api-key`, `anthropic-version: 2023-06-01`, `anthropic-dangerous-direct-browser-access: true`, `content-type: application/json`
+  - Body: `{ model: "claude-sonnet-4-6", max_tokens: 1024, stream: true, system: [<cached blocks>], messages: <chatMessages>, tools: [recommend_books] }`
+
+### Stage 3 — STREAM IN
+
+Parse Server-Sent Events (SSE) chunks as they arrive:
+
+| SSE event | Action |
+|---|---|
+| `content_block_start` (type=`text`) | Create a new AI bubble in the DOM |
+| `content_block_delta` (text delta) | Append delta to the current AI bubble; auto-scroll |
+| `content_block_start` (type=`tool_use`, name=`recommend_books`) | Start buffering tool input JSON |
+| `input_json_delta` | Accumulate JSON fragment into the tool buffer |
+| `content_block_stop` (tool_use) | Parse the accumulated JSON, extract `picks: [{author, title, reasoning}]`, render 3 pick cards with gradient placeholders, kick off cover hydration |
+| `message_stop` | Re-enable input, log usage stats for cost tracking (optional) |
+
+If the model emits a follow-up question, it appears as plain `text` content (not a tool call) — we render it as the **drawer above the input**, not as a chat bubble, by detecting the trailing text block after a tool_use stop event. Drawer replaces any prior drawer in the DOM.
+
+### Stage 4 — COVER HYDRATION
+
+For each rendered pick, in parallel:
+
+1. Check `libros_cover_cache[author|title]`
+2. **Hit (URL)** → set `<img src>` to cached URL — instant
+3. **Hit (null sentinel)** → no result on previous lookup, stay on gradient — instant
+4. **Miss** → `fetch('https://openlibrary.org/search.json?q=' + encodeURIComponent(title + ' ' + author) + '&limit=1')`
+   - If `docs[0].cover_i` exists → URL = `https://covers.openlibrary.org/b/id/<cover_i>-M.jpg`; set `<img src>`, cache URL
+   - If no result or fetch error → cache `null` so we don't retry, stay on gradient
+
+All failures stay silent — the gradient cover is always a valid visual state.
+
+### Stage 5 — USER ACTION
+
+- Tap **+ Add to wishlist** on a pick →
+  - `wishlist.push({ author, title })`
+  - `saveWishlist(wishlist)` — **existing fn**; debounces and triggers the existing GitHub auto-push at 1.5s
+  - Button flips to `✓ Added` (disabled state)
+  - `toast('Added to wishlist')` (existing toast component)
+- Tap a refinement chip → goes back to Stage 2 with the chip text as the user message
+- Type a custom reply → same, with the typed text
+- Close modal (× or click outside) → clears `chatMessages` and any in-flight drawer; nothing persists
+
+### Key properties
+
+- **Library state read fresh every turn** — fluid context, never stale
+- **Streaming = chat feels alive** within ~300ms of send
+- **Tool call = pick cards rendered from structured data**, not regex-parsed text
+- **No new sync infra** — wishlist push reuses existing pipeline
+- **Cover cache survives across sessions** in localStorage, independent of `books` data
 
 ---
 
@@ -178,3 +251,4 @@ _To be filled after approval._
 
 - 2026-05-13 — Initial scope, all 8 decisions locked. Architecture diagram approved.
 - 2026-05-14 — Section 2 (UI) v2 reviewed: liquid bubbles + cover art approved. Question-vs-pick differentiation revisited with three alternative styles (section labels / banner with avatar / drawer above input). User selected **drawer above input** (Option C). Cover source switched from Google Books to Open Library after Google's anonymous quota proved unreliable during testing. Section 2 now locked.
+- 2026-05-14 — Section 3 (data flow) approved as-presented: 5-stage flow with SSE streaming, tool-call parsing, async cover hydration via Open Library, and wishlist push reusing existing `saveWishlist()`. Moving to Section 4 (API + prompt structure).
