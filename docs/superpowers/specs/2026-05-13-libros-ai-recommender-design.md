@@ -87,9 +87,51 @@ One new self-contained module inside `index.html` (consistent with existing sing
 
 ---
 
-## UI components (mockup pending — Section 2)
+## UI components
 
-_To be filled after browser mockup review._
+### Floating action button (FAB)
+
+- Glass orb, ~44–48px circular, fixed bottom-right (24px from edges)
+- Linear gradient (`#c4b5fd → #7b6bbd`) with inset highlight and soft outer shadow
+- Sparkle (✨) icon centered
+- Always visible, stays above book list while scrolling
+- Tap → opens chat modal
+- Hidden when the chat modal is open (no double-affordance)
+
+### Chat modal
+
+Reuses the existing `wish-modal` overlay pattern: fade-in overlay, centered glass card, click-outside-to-close, ESC-to-close. Dark theme matches the rest of the app.
+
+**Structure (top to bottom):**
+
+1. **Header bar** — small ✨ sparkle icon + "Ask the librarian" title on the left; close (×) button on the right; thin border-bottom separator.
+2. **Message stream** — vertical column, scrollable:
+   - **AI bubbles** — left-aligned, glass background (`rgba(255,255,255,0.07)`), 1px inner border, blur+saturate backdrop, 16/16/16/6 radius, inset top highlight. Hover lifts -1px and brightens.
+   - **User bubbles** — right-aligned, purple gradient (`rgba(196,181,253,0.35) → rgba(123,107,189,0.35)`), inset highlight, 16/16/6/16 radius. Same hover lift.
+   - **Pick cards** — flex row with a 42×60 cover thumbnail on the left and info column on the right (author label uppercase, title bold, 1–2 sentence "why", primary action button). Cards lift -2px on hover with a subtle purple shadow.
+   - **Pick action button states**:
+     - Default: `+ Add to wishlist` — purple-tinted glass pill
+     - After click: `✓ Added` — green-tinted glass pill, non-interactive
+   - **Refine-question block** (appears after picks): dashed-line separator above; small uppercase purple label ("Want to refine?") with a glowing dot; left-bordered card with subtle purple gradient background; tappable refinement chips below (e.g., "Polish only", "More fiction", "Heavier"). Visually distinct from a regular AI bubble so it reads as an actionable question, not commentary.
+3. **Input area** — pinned bottom: rounded glass capsule with text field + circular gradient send button.
+4. **Empty state** (just opened, no messages yet) — centered icon (📚) + tagline ("I've read your 357 books. Tell me what you're in the mood for…") + a single primary "✨ Recommend me something" chip that fires the quick-start prompt. The text input is still available below for typed prompts.
+
+### Book covers — fetched from Google Books API
+
+- After the AI's tool call returns 3 picks, for each pick we async-call `https://www.googleapis.com/books/v1/volumes?q=intitle:<title>+inauthor:<author>&maxResults=1` (free, no key)
+- Use `items[0].volumeInfo.imageLinks.thumbnail` (HTTPS-fix the URL — Google returns `http://` by default; rewrite to `https://`)
+- Render the image inside the existing 42×60 cover slot
+- **Fallback if API fails or no match:** keep the gradient-with-title-text already shown — looks intentional, never broken
+- Cards render immediately with the gradient; cover image swaps in when the fetch resolves (~100-300ms typical)
+- One small cache (`libros_cover_cache` in localStorage, keyed by `${author}|${title}`) so repeat asks for the same book are instant on subsequent turns
+
+### Liquid-glass treatment (matches existing app)
+
+Every interactive surface (bubbles, pick cards, refine chips, FAB) gets:
+- `backdrop-filter: blur(20px) saturate(140%)` for real glass
+- `inset 0 1px 0 rgba(255,255,255,X)` for the bright top edge
+- Soft outer drop shadow (purple tint on the heavier elements)
+- Hover transition: `translateY(-1px or -2px)` + background brighten + shadow bloom — matches existing book-card hover
 
 ---
 
@@ -125,4 +167,5 @@ _To be filled after approval._
 
 ## Brainstorming session log
 
-- 2026-05-13 — Initial scope, all 8 decisions locked. Architecture diagram approved. Continuing with UI/data-flow sections.
+- 2026-05-13 — Initial scope, all 8 decisions locked. Architecture diagram approved.
+- 2026-05-14 — Section 2 (UI) approved with v2 mockup: liquid bubbles with hover lift, real Google Books cover art with gradient fallback, dedicated "Want to refine?" question block separated from pick cards. Continuing with data flow.
