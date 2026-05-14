@@ -223,9 +223,137 @@ All failures stay silent — the gradient cover is always a valid visual state.
 
 ---
 
-## API + prompt structure (pending — Section 4)
+## API + prompt structure
 
-_To be filled after approval._
+The contract with Claude has three pieces: the system prompt, the tool schema, and the message history shape.
+
+### System prompt (cached, ~4,500 tokens)
+
+Single string built once per call from current state. Marked `cache_control: { type: "ephemeral" }` so subsequent turns in the same session pay ~$0.0006 instead of ~$0.015 for input.
+
+```
+You are a thoughtful librarian for Tomek. You know his full reading history
+and you suggest books he'd actually love.
+
+PERSONALITY
+- Warm but concise. No flattery. Treat him like a friend who reads a lot.
+- When suggesting picks, tie each one to a specific book he's already read
+  ("because you loved X" / "this riffs on Y's theme").
+- Respect language preferences from his history — if he reads mostly Polish
+  fiction, lean that way unless he asks otherwise.
+- Don't recommend books he's already read or anything currently on his wishlist.
+
+TOOL USE
+- When recommending books, ALWAYS invoke the `recommend_books` tool with
+  exactly 3 picks.
+- Before the tool call, write 1–2 short sentences of conversational context
+  (what mood / connection you're going for).
+- After the tool call, if a clarifying question would meaningfully improve
+  the next round of picks, end with one short follow-up question in plain
+  text. If picks already feel well-targeted, skip the question.
+
+NEVER
+- Invent ISBNs, page counts, publishers, or other metadata you're not sure of.
+- Suggest more than 3 picks per turn.
+- Suggest books already in <read_history> or <wishlist>.
+
+<read_history>
+{ "2026": [...], "2025": [...], ... }   // JSON of the books global, all years
+</read_history>
+
+<wishlist>
+[ { "author": "...", "title": "..." }, ... ]   // current wishlist
+</wishlist>
+```
+
+### Tool schema — `recommend_books`
+
+```json
+{
+  "name": "recommend_books",
+  "description": "Return exactly 3 book recommendations tailored to the user's reading history.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "picks": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {
+          "type": "object",
+          "properties": {
+            "author": {
+              "type": "string",
+              "description": "Author's full name as commonly printed on the cover."
+            },
+            "title": {
+              "type": "string",
+              "description": "Book title as commonly known. If the user reads mostly Polish, prefer the Polish edition title."
+            },
+            "reasoning": {
+              "type": "string",
+              "description": "1–2 sentences explaining why this book fits, ideally tied to a specific book the user has read."
+            }
+          },
+          "required": ["author", "title", "reasoning"]
+        }
+      }
+    },
+    "required": ["picks"]
+  }
+}
+```
+
+### Message history
+
+In-memory array, cleared on modal close:
+
+```js
+chatMessages = [
+  { role: "user",      content: "Based on my library, what should I read next?" },
+  { role: "assistant", content: [
+      { type: "text",     text: "Based on your taste for Houellebecq…" },
+      { type: "tool_use", id: "toolu_01...", name: "recommend_books", input: { picks: [...] } },
+      { type: "text",     text: "Should I lean more towards Polish authors, or stay international?" }
+  ]},
+  { role: "user",      content: "Polish only" },
+  // next turn appended here
+]
+```
+
+### Request shape
+
+```
+POST https://api.anthropic.com/v1/messages
+Headers:
+  x-api-key: <libros_ai_key>
+  anthropic-version: 2023-06-01
+  anthropic-dangerous-direct-browser-access: true
+  content-type: application/json
+
+Body:
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 1024,
+  "stream": true,
+  "system": [
+    {
+      "type": "text",
+      "text": "<the full system prompt above>",
+      "cache_control": { "type": "ephemeral" }
+    }
+  ],
+  "messages": <chatMessages>,
+  "tools": [<recommend_books schema>]
+}
+```
+
+### Design rationale
+
+- **`max_tokens: 1024`** — picks + reasoning + optional follow-up fit comfortably; caps cost on runaways.
+- **Cached `system` block** — library is the only large thing; messages stay tiny (~50–200 tokens). Cache key is the system-content hash, so adding a book invalidates cleanly and rebuilds on the next call.
+- **`minItems: 3, maxItems: 3` on `picks`** — Anthropic's tool validator enforces this server-side, so we never receive a malformed pick count.
+- **No `tool_choice` forced** — left optional so the model can reply text-only when appropriate (e.g., answering a non-recommendation question like "what does X book deal with?").
 
 ---
 
@@ -251,4 +379,5 @@ _To be filled after approval._
 
 - 2026-05-13 — Initial scope, all 8 decisions locked. Architecture diagram approved.
 - 2026-05-14 — Section 2 (UI) v2 reviewed: liquid bubbles + cover art approved. Question-vs-pick differentiation revisited with three alternative styles (section labels / banner with avatar / drawer above input). User selected **drawer above input** (Option C). Cover source switched from Google Books to Open Library after Google's anonymous quota proved unreliable during testing. Section 2 now locked.
-- 2026-05-14 — Section 3 (data flow) approved as-presented: 5-stage flow with SSE streaming, tool-call parsing, async cover hydration via Open Library, and wishlist push reusing existing `saveWishlist()`. Moving to Section 4 (API + prompt structure).
+- 2026-05-14 — Section 3 (data flow) approved as-presented: 5-stage flow with SSE streaming, tool-call parsing, async cover hydration via Open Library, and wishlist push reusing existing `saveWishlist()`.
+- 2026-05-14 — Section 4 (API + prompt structure) approved as-presented: system prompt with cached library/wishlist context, `recommend_books` tool with 3-pick array schema, claude-sonnet-4-6, stream=true, max_tokens=1024. Moving to Section 5 (error handling).
